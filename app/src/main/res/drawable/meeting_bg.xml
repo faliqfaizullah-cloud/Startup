@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Placeholder sky-to-sand backdrop for the meeting screen and widget.
+  To use your own photo: delete this file and add res/drawable/meeting_bg.jpg
+  (keep it under ~1 MB so the widget stays within RemoteViews bitmap limits).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="360dp"
+    android:height="720dp"
+    android:viewportWidth="360"
+    android:viewportHeight="720">
+    <path android:pathData="M0,0h360v720h-360z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="0"
+                android:endY="720"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF6F9FCB" />
+                <item android:offset="0.55" android:color="#FF8DB4D6" />
+                <item android:offset="1.0" android:color="#FFE0C29B" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

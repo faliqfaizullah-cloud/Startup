@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Startup</string>
+    <string name="widget_desc">Your next meeting at a glance (2×2)</string>
+</resources>

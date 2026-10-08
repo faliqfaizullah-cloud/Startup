@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="startup_yellow">#F2FF1A</color>
+    <color name="startup_ink">#2B2B2B</color>
+    <style name="Theme.Startup" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FF111111</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
