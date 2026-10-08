@@ -337,6 +337,7 @@ fun HomeScreen(
     var menu by remember { mutableStateOf(false) }
     var showNew by remember { mutableStateOf(false) }
     var showMember by remember { mutableStateOf(false) }
+    var showJoin by remember { mutableStateOf(false) }
 
     fun exactCheck() {
         if (Build.VERSION.SDK_INT >= 31) {
@@ -459,6 +460,7 @@ fun HomeScreen(
                             contentAlignment = Alignment.Center,
                         ) { Icon(Icons.Filled.MoreVert, null, tint = Ink, modifier = Modifier.size(18.dp)) }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Join with code or link") }, onClick = { menu = false; showJoin = true })
                             DropdownMenuItem(text = { Text("New meeting") }, onClick = { menu = false; showNew = true })
                             DropdownMenuItem(text = { Text("Add widget to home screen") }, onClick = { menu = false; requestPin(ctx) })
                         }
@@ -476,6 +478,14 @@ fun HomeScreen(
                         Column(Modifier.weight(1f)) {
                             Text(m.title, style = txt(17, FontWeight.Medium, Ink))
                             Text(m.host, style = txt(14, FontWeight.Normal, Grey))
+                        }
+                        if (m.link.isNotBlank()) {
+                            Box(
+                                Modifier.clip(RoundedCornerShape(50)).background(Yellow)
+                                    .bounceClick { Join.open(ctx, m.link) }
+                                    .padding(horizontal = 12.dp, vertical = 5.dp),
+                            ) { Text("Join", style = txt(12, FontWeight.SemiBold, Ink)) }
+                            Spacer(Modifier.width(8.dp))
                         }
                         Text(hm(m.time), style = txt(13, FontWeight.Normal, Grey))
                     }
@@ -501,6 +511,7 @@ fun HomeScreen(
 
     if (showNew) NewMeetingDialog({ showNew = false }) { onAddMeeting(it); showNew = false }
     if (showMember) AddMemberDialog({ showMember = false }) { onAddMember(it); showMember = false }
+    if (showJoin) JoinDialog { showJoin = false }
 }
 
 @Composable
@@ -557,6 +568,7 @@ fun StickerView(kind: String, modifier: Modifier) {
 @Composable
 fun MeetingScreen(m: Meeting, onClose: () -> Unit) {
     val haptic = LocalHapticFeedback.current
+    val ctx = LocalContext.current
     var secs by remember { mutableIntStateOf(0) }
     var tray by remember { mutableStateOf(false) }
     val stickers = remember { mutableStateListOf<Sticker>() }
@@ -594,6 +606,13 @@ fun MeetingScreen(m: Meeting, onClose: () -> Unit) {
                 }
                 Text("Meeting", style = txt(60, FontWeight.SemiBold))
                 Text(mmss(secs), style = txt(14, FontWeight.Normal, Color.White.copy(.9f)))
+            }
+
+            if (m.link.isNotBlank()) {
+                PillButton(
+                    "Join ${Platform.detect(m.link)?.label ?: "meeting"}", true,
+                    Modifier.align(Alignment.CenterHorizontally).padding(top = 14.dp).width(240.dp).height(48.dp),
+                ) { Join.open(ctx, m.link) }
             }
 
             AnimatedVisibility(tray, enter = fadeIn(), exit = fadeOut()) {
@@ -651,6 +670,7 @@ fun NewMeetingDialog(onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
     var minute by remember { mutableIntStateOf(30) }
     var remind by remember { mutableIntStateOf(10) }
     var alarm by remember { mutableStateOf(true) }
+    var link by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -659,6 +679,10 @@ fun NewMeetingDialog(onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(title, { title = it }, label = { Text("Title") }, singleLine = true)
                 OutlinedTextField(host, { host = it }, label = { Text("Host") }, singleLine = true)
+                OutlinedTextField(
+                    link, { link = it }, singleLine = true,
+                    label = { Text("Meet / Teams / Zoom link (optional)") },
+                )
                 OutlinedButton(onClick = {
                     TimePickerDialog(ctx, { _, h, mi -> hour = h; minute = mi }, hour, minute, true).show()
                 }) { Text("Time  %02d:%02d".format(hour, minute)) }
@@ -685,10 +709,47 @@ fun NewMeetingDialog(onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
                         Meeting(
                             (System.currentTimeMillis() % 1_000_000_000L).toInt(), title.trim(), "Product Team",
                             host.ifBlank { "Me" }, cal.timeInMillis, remind, alarm, 1,
+                            link = link.trim().let { if (it.isNotEmpty() && !it.startsWith("http", true)) "https://$it" else it },
                         )
                     )
                 }
             }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+fun JoinDialog(onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    var platform by remember { mutableStateOf(Platform.MEET) }
+    var input by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Join with code or link") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Platform.entries.forEach { p ->
+                        FilterChip(selected = platform == p, onClick = { platform = p }, label = { Text(p.short) })
+                    }
+                }
+                OutlinedTextField(
+                    input, { input = it }, singleLine = true,
+                    label = { Text(if (platform == Platform.TEAMS) "Meeting link" else "Code, ID or link") },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val link = Platform.toLink(platform, input)
+                if (link == null) {
+                    Toast.makeText(ctx, "Enter a valid code, ID or full link", Toast.LENGTH_LONG).show()
+                } else {
+                    Join.open(ctx, link)
+                    onDismiss()
+                }
+            }) { Text("Join") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

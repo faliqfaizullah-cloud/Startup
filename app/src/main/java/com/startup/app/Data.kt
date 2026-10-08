@@ -8,6 +8,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -15,6 +16,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.os.VibrationAttributes
@@ -22,6 +24,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.widget.RemoteViews
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -45,6 +48,7 @@ data class Meeting(
     val alarm: Boolean = true,
     val people: Int = 5,
     val kind: String = "Weekly Sync",
+    val link: String = "",
 )
 
 object Store {
@@ -63,7 +67,7 @@ object Store {
             Meeting(
                 o.getInt("id"), o.getString("title"), o.getString("team"), o.getString("host"),
                 o.getLong("time"), o.getInt("remind"), o.getBoolean("alarm"), o.getInt("people"),
-                o.optString("kind", "Weekly Sync"),
+                o.optString("kind", "Weekly Sync"), o.optString("link", ""),
             )
         }.sortedBy { it.time }
     }
@@ -74,7 +78,7 @@ object Store {
             a.put(
                 JSONObject().put("id", it.id).put("title", it.title).put("team", it.team)
                     .put("kind", it.kind).put("host", it.host).put("time", it.time)
-                    .put("remind", it.remind).put("alarm", it.alarm).put("people", it.people)
+                    .put("remind", it.remind).put("alarm", it.alarm).put("people", it.people).put("link", it.link)
             )
         }
         p(c).edit().putString("meetings", a.toString()).apply()
@@ -191,6 +195,14 @@ class AlarmReceiver : BroadcastReceiver() {
             .setContentIntent(open)
             .addAction(0, "Start", open)
             .addAction(0, "Snooze 5 min", snooze)
+        if (m.link.isNotBlank()) {
+            val joinIntent = PendingIntent.getActivity(
+                c, id + 200_000,
+                Intent(Intent.ACTION_VIEW, Uri.parse(m.link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            b.addAction(0, "Join", joinIntent)
+        }
         if (m.alarm) b.setCategory(NotificationCompat.CATEGORY_ALARM).setFullScreenIntent(open, true)
         else b.setCategory(NotificationCompat.CATEGORY_REMINDER)
 
@@ -209,6 +221,59 @@ class BootReceiver : BroadcastReceiver() {
 }
 
 // ───────────────────────── Haptics + pin result ─────────────────────────
+
+// ───────────────────────── Google Meet / Teams / Zoom ─────────────────────────
+
+enum class Platform(val label: String, val short: String, val pkg: String) {
+    MEET("Google Meet", "Meet", "com.google.android.apps.tachyon"),
+    TEAMS("Microsoft Teams", "Teams", "com.microsoft.teams"),
+    ZOOM("Zoom", "Zoom", "us.zoom.videomeetings");
+
+    companion object {
+        fun detect(link: String): Platform? {
+            val l = link.lowercase()
+            return when {
+                "meet.google." in l -> MEET
+                "teams.microsoft." in l || "teams.live." in l -> TEAMS
+                "zoom.us" in l || "zoom.com" in l -> ZOOM
+                else -> null
+            }
+        }
+
+        /** Turns a pasted link, Meet code or Zoom ID into a join URL. Teams needs the full link. */
+        fun toLink(p: Platform, raw: String): String? {
+            val s = raw.trim()
+            if (s.isEmpty()) return null
+            if (s.startsWith("http", true)) return s
+            if ("/" in s && "." in s) return "https://$s"
+            return when (p) {
+                MEET -> "https://meet.google.com/" + s.replace(" ", "")
+                ZOOM -> s.filter { it.isDigit() }.takeIf { it.isNotEmpty() }?.let { "https://zoom.us/j/$it" }
+                TEAMS -> null
+            }
+        }
+    }
+}
+
+object Join {
+    /** Opens the meeting in its app if installed, otherwise in the browser. */
+    fun open(c: Context, link: String) {
+        val base = Intent(Intent.ACTION_VIEW, Uri.parse(link)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        Haptics.pop(c)
+        Platform.detect(link)?.let { p ->
+            try {
+                c.startActivity(Intent(base).setPackage(p.pkg))
+                return
+            } catch (_: ActivityNotFoundException) {
+            }
+        }
+        try {
+            c.startActivity(base)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(c, "No app or browser can open this link", Toast.LENGTH_LONG).show()
+        }
+    }
+}
 
 object Haptics {
     fun pop(c: Context) {
