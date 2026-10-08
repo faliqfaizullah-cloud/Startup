@@ -35,7 +35,7 @@
         android:paddingBottom="4dp"
         android:textColor="#2B2B2B"
         android:textSize="11sp"
-        android:text="Team Standup" />
+        android:text="Startup" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -57,7 +57,7 @@
                 android:layout_height="wrap_content"
                 android:textColor="#FFFFFF"
                 android:textSize="11sp"
-                android:text="09:30" />
+                android:text="--:--" />
 
             <TextView
                 android:id="@+id/w_team"
@@ -69,7 +69,7 @@
                 android:maxWidth="64dp"
                 android:textColor="#CCFFFFFF"
                 android:textSize="11sp"
-                android:text="| Product Team" />
+                android:text="| Add a meeting" />
         </LinearLayout>
 
         <TextView

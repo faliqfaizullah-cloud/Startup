@@ -9,6 +9,7 @@ import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.ActivityNotFoundException
+import android.content.SharedPreferences
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -17,6 +18,8 @@ import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.net.Uri
+import android.util.Base64
+import android.util.Patterns
 import android.os.Build
 import android.os.SystemClock
 import android.os.VibrationAttributes
@@ -31,7 +34,11 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableSharedFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.text.SimpleDateFormat
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
@@ -47,27 +54,32 @@ data class Meeting(
     val remind: Int = 10,
     val alarm: Boolean = true,
     val people: Int = 5,
-    val kind: String = "Weekly Sync",
+    val kind: String = "",
     val link: String = "",
 )
 
 object Store {
-    private fun p(c: Context) = c.getSharedPreferences("startup", Context.MODE_PRIVATE)
+    /** App-wide settings (not tied to an account). */
+    private fun g(c: Context) = c.getSharedPreferences("startup", Context.MODE_PRIVATE)
+
+    /** Meetings and members live in a separate store per logged-in account. */
+    private fun p(c: Context): SharedPreferences {
+        val u = Accounts.current(c) ?: "none"
+        val id = MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(16)
+        return c.getSharedPreferences("startup_data_$id", Context.MODE_PRIVATE)
+    }
 
     fun meetings(c: Context): List<Meeting> {
         val raw = p(c).getString("meetings", null)
-        if (raw == null) {
-            val s = seed()
-            save(c, s)
-            return s
-        }
+        if (raw == null) return emptyList()
         val a = JSONArray(raw)
         return (0 until a.length()).map {
             val o = a.getJSONObject(it)
             Meeting(
                 o.getInt("id"), o.getString("title"), o.getString("team"), o.getString("host"),
                 o.getLong("time"), o.getInt("remind"), o.getBoolean("alarm"), o.getInt("people"),
-                o.optString("kind", "Weekly Sync"), o.optString("link", ""),
+                o.optString("kind", ""), o.optString("link", ""),
             )
         }.sortedBy { it.time }
     }
@@ -85,29 +97,68 @@ object Store {
     }
 
     fun members(c: Context): List<String> =
-        p(c).getString("members", "Alex|Sophia|Eric|Eva")!!.split("|").filter { it.isNotBlank() }
+        p(c).getString("members", "")!!.split("|").filter { it.isNotBlank() }
 
     fun saveMembers(c: Context, m: List<String>) =
         p(c).edit().putString("members", m.joinToString("|")).apply()
 
-    fun onboarded(c: Context) = p(c).getBoolean("onboarded", false)
-    fun setOnboarded(c: Context) = p(c).edit().putBoolean("onboarded", true).apply()
+    fun onboarded(c: Context) = g(c).getBoolean("onboarded", false)
+    fun setOnboarded(c: Context) = g(c).edit().putBoolean("onboarded", true).apply()
 
-    private fun at(h: Int, m: Int): Long = Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m)
-        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-    }.timeInMillis
-
-    private fun seed() = listOf(
-        Meeting(1, "Daily Engineering Sync", "Engineering", "Rahul Verma", at(9, 30), kind = "Daily Sync"),
-        Meeting(2, "Sprint 24 Planning", "Product Team", "Caleb May", at(11, 0), kind = "Planning"),
-        Meeting(3, "Quarterly Stakeholder", "Leadership", "Alex Espy", at(14, 0), kind = "Quarterly"),
-        Meeting(4, "Growth Strategy Review", "Growth", "Sophia", at(15, 0), people = 5, kind = "Review"),
-        Meeting(5, "Product Discovery Session", "Product Team", "Eric", at(15, 0), people = 6, kind = "Discovery"),
-    )
 }
 
 // ───────────────────────── Reminders / alarms ─────────────────────────
+
+// ───────────────────────── Accounts (stored on this phone only) ─────────────────────────
+
+object Accounts {
+    private fun g(c: Context) = c.getSharedPreferences("startup_accounts", Context.MODE_PRIVATE)
+    private fun key(email: String) = email.trim().lowercase()
+
+    fun current(c: Context): String? = g(c).getString("session", null)
+
+    fun name(c: Context): String =
+        current(c)?.let { g(c).getString("name_$it", null) } ?: ""
+
+    /** Returns an error message, or null on success (the new account is logged in). */
+    fun register(c: Context, name: String, email: String, pass: String): String? {
+        val k = key(email)
+        if (name.isBlank()) return "Enter your name"
+        if (!Patterns.EMAIL_ADDRESS.matcher(k).matches()) return "Enter a valid email"
+        if (pass.length < 6) return "Password must be at least 6 characters"
+        if (g(c).contains("hash_$k")) return "An account with this email already exists"
+        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        g(c).edit()
+            .putString("name_$k", name.trim())
+            .putString("salt_$k", Base64.encodeToString(salt, Base64.NO_WRAP))
+            .putString("hash_$k", hash(pass, salt))
+            .putString("session", k)
+            .apply()
+        return null
+    }
+
+    /** Returns an error message, or null on success. */
+    fun login(c: Context, email: String, pass: String): String? {
+        val k = key(email)
+        val salt = g(c).getString("salt_$k", null)
+        val stored = g(c).getString("hash_$k", null)
+        if (salt == null || stored == null) return "No account found for this email"
+        val h = hash(pass, Base64.decode(salt, Base64.NO_WRAP))
+        if (!MessageDigest.isEqual(h.toByteArray(), stored.toByteArray())) return "Wrong password"
+        g(c).edit().putString("session", k).apply()
+        return null
+    }
+
+    fun logout(c: Context) {
+        g(c).edit().remove("session").apply()
+    }
+
+    private fun hash(pass: String, salt: ByteArray): String {
+        val spec = PBEKeySpec(pass.toCharArray(), salt, 120_000, 256)
+        val bytes = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+    }
+}
 
 const val CH_REMIND = "startup_reminders"
 const val CH_ALARM = "startup_alarms"
@@ -331,6 +382,12 @@ class StartupWidget : AppWidgetProvider() {
                 val left = next.time - now
                 rv.setChronometerCountDown(R.id.w_timer, true)
                 rv.setChronometer(R.id.w_timer, SystemClock.elapsedRealtime() + maxOf(left, 0L), null, left > 0)
+            } else {
+                rv.setTextViewText(R.id.w_chip, "No meetings")
+                rv.setTextViewText(R.id.w_time, "--:--")
+                rv.setTextViewText(R.id.w_team, "| Add one in Startup")
+                rv.setChronometerCountDown(R.id.w_timer, true)
+                rv.setChronometer(R.id.w_timer, SystemClock.elapsedRealtime(), null, false)
             }
 
             val open = PendingIntent.getActivity(

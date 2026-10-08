@@ -54,7 +54,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -206,6 +209,8 @@ fun CircleBtn(modifier: Modifier = Modifier, size: Dp = 52.dp, a: Float = 0.22f,
 
 sealed interface Screen {
     data object Onboard : Screen
+    data object Login : Screen
+    data object Register : Screen
     data object Home : Screen
     data class Meet(val id: Int) : Screen
 }
@@ -215,14 +220,24 @@ fun StartupRoot(openId: Int?) {
     val ctx = LocalContext.current
     var meetings by remember { mutableStateOf(Store.meetings(ctx)) }
     var members by remember { mutableStateOf(Store.members(ctx)) }
+    var userName by remember { mutableStateOf(Accounts.name(ctx)) }
     var screen by remember {
         mutableStateOf<Screen>(
             when {
+                !Store.onboarded(ctx) -> Screen.Onboard
+                Accounts.current(ctx) == null -> Screen.Login
                 openId != null -> Screen.Meet(openId)
-                Store.onboarded(ctx) -> Screen.Home
-                else -> Screen.Onboard
+                else -> Screen.Home
             }
         )
+    }
+
+    fun loadAccount() {
+        meetings = Store.meetings(ctx)
+        members = Store.members(ctx)
+        userName = Accounts.name(ctx)
+        Reminders.scheduleAll(ctx)
+        StartupWidget.refreshAll(ctx)
     }
 
     fun reload() {
@@ -230,7 +245,9 @@ fun StartupRoot(openId: Int?) {
         StartupWidget.refreshAll(ctx)
     }
 
-    BackHandler(enabled = screen !is Screen.Home) { screen = Screen.Home }
+    BackHandler(enabled = screen is Screen.Meet || screen is Screen.Register) {
+        screen = if (screen is Screen.Register) Screen.Login else Screen.Home
+    }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Ink)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -239,14 +256,29 @@ fun StartupRoot(openId: Int?) {
                     Screen.Onboard -> Onboarding(
                         onStart = {
                             Store.setOnboarded(ctx)
-                            val first = meetings.firstOrNull()
-                            screen = if (first != null) Screen.Meet(first.id) else Screen.Home
+                            screen = if (Accounts.current(ctx) == null) Screen.Login else Screen.Home
                         },
-                        onFinish = { Store.setOnboarded(ctx); screen = Screen.Home },
+                        onFinish = {
+                            Store.setOnboarded(ctx)
+                            screen = if (Accounts.current(ctx) == null) Screen.Login else Screen.Home
+                        },
                     )
+                    Screen.Login -> AuthScreen(false, { screen = Screen.Register }) {
+                        loadAccount(); screen = Screen.Home
+                    }
+                    Screen.Register -> AuthScreen(true, { screen = Screen.Login }) {
+                        loadAccount(); screen = Screen.Home
+                    }
                     Screen.Home -> HomeScreen(
                         meetings = meetings,
                         members = members,
+                        userName = userName,
+                        onLogout = {
+                            meetings.forEach { Reminders.cancel(ctx, it) }
+                            Accounts.logout(ctx)
+                            loadAccount()
+                            screen = Screen.Login
+                        },
                         onOpen = { screen = Screen.Meet(it) },
                         onAddMeeting = { m ->
                             Store.save(ctx, meetings + m)
@@ -310,6 +342,94 @@ fun Onboarding(onStart: () -> Unit, onFinish: () -> Unit) {
 
 // ───────────────────────── Home ─────────────────────────
 
+@Composable
+fun AuthScreen(register: Boolean, onSwitch: () -> Unit, onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    var name by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF1F1B1A), Color(0xFF4A3832), Color(0xFFB5604A), Color(0xFFD08A73)))
+        )
+    ) {
+        Column(Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Spacer(Modifier.height(40.dp))
+            Text(if (register) "Create account" else "Welcome back", style = txt(40))
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (register) "Register to plan meetings and get reminded." else "Log in to see your meetings.",
+                style = txt(15, FontWeight.Normal, Color.White.copy(.8f)),
+            )
+            Spacer(Modifier.height(28.dp))
+
+            Column(
+                Modifier.fillMaxWidth().clip(R28).background(Color.White).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (register) {
+                    OutlinedTextField(
+                        name, { name = it }, label = { Text("Full name") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                OutlinedTextField(
+                    email, { email = it }, label = { Text("Email") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    pass, { pass = it }, label = { Text("Password") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (register) {
+                    OutlinedTextField(
+                        confirm, { confirm = it }, label = { Text("Confirm password") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                error?.let { Text(it, style = txt(13, FontWeight.Normal, Color(0xFFD32F2F))) }
+                Box(
+                    Modifier.fillMaxWidth().height(56.dp).clip(RoundedCornerShape(50)).background(Yellow)
+                        .bounceClick {
+                            val err: String? = if (register) {
+                                if (pass != confirm) "Passwords do not match" else Accounts.register(ctx, name, email, pass)
+                            } else {
+                                Accounts.login(ctx, email, pass)
+                            }
+                            if (err == null) {
+                                onDone()
+                            } else {
+                                error = err
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) { Text(if (register) "Register" else "Log in", style = txt(16, FontWeight.SemiBold, Ink)) }
+            }
+
+            Spacer(Modifier.height(18.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                Text(
+                    if (register) "Already have an account? " else "No account yet? ",
+                    style = txt(14, FontWeight.Normal, Color.White.copy(.8f)),
+                )
+                Text(
+                    if (register) "Log in" else "Register",
+                    style = txt(14, FontWeight.SemiBold, Yellow),
+                    modifier = Modifier.clickable { onSwitch() },
+                )
+            }
+        }
+    }
+}
+
 fun requestPin(ctx: Context) {
     val mgr = AppWidgetManager.getInstance(ctx)
     if (mgr.isRequestPinAppWidgetSupported) {
@@ -327,6 +447,8 @@ fun requestPin(ctx: Context) {
 fun HomeScreen(
     meetings: List<Meeting>,
     members: List<String>,
+    userName: String,
+    onLogout: () -> Unit,
     onOpen: (Int) -> Unit,
     onAddMeeting: (Meeting) -> Unit,
     onAddMember: (String) -> Unit,
@@ -355,6 +477,10 @@ fun HomeScreen(
     }
 
     val now = System.currentTimeMillis()
+    val endOfDay = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59)
+    }.timeInMillis
+    val todayLeft = meetings.count { it.time in now..endOfDay }
     val upcoming = meetings.filter { it.time >= now }.ifEmpty { meetings }
     val shown = meetings.filter {
         query.isBlank() || it.title.contains(query, true) || it.host.contains(query, true)
@@ -377,11 +503,13 @@ fun HomeScreen(
             // header
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box {
-                    Avatar("Caleb May", 44.dp)
-                    Box(
-                        Modifier.align(Alignment.TopEnd).size(18.dp).clip(CircleShape).background(Yellow),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("3", style = txt(10, FontWeight.SemiBold, Ink)) }
+                    Avatar(userName.ifBlank { "?" }, 44.dp)
+                    if (todayLeft > 0) {
+                        Box(
+                            Modifier.align(Alignment.TopEnd).size(18.dp).clip(CircleShape).background(Yellow),
+                            contentAlignment = Alignment.Center,
+                        ) { Text("$todayLeft", style = txt(10, FontWeight.SemiBold, Ink)) }
+                    }
                 }
                 Spacer(Modifier.width(10.dp))
                 if (searching) {
@@ -397,7 +525,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                     )
                 } else {
-                    Text("Caleb May", style = txt(20), modifier = Modifier.weight(1f))
+                    Text(userName, style = txt(20), maxLines = 1, modifier = Modifier.weight(1f))
                 }
                 CircleBtn(size = 46.dp, onClick = { searching = !searching; if (!searching) query = "" }) {
                     Icon(if (searching) Icons.Filled.Close else Icons.Filled.Search, null, tint = Color.White)
@@ -427,7 +555,7 @@ fun HomeScreen(
             }
 
             // glass cards
-            Spacer(Modifier.height(18.dp))
+            if (upcoming.isNotEmpty()) Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 upcoming.take(2).forEach { m ->
                     Column(
@@ -463,6 +591,7 @@ fun HomeScreen(
                             DropdownMenuItem(text = { Text("Join with code or link") }, onClick = { menu = false; showJoin = true })
                             DropdownMenuItem(text = { Text("New meeting") }, onClick = { menu = false; showNew = true })
                             DropdownMenuItem(text = { Text("Add widget to home screen") }, onClick = { menu = false; requestPin(ctx) })
+                            DropdownMenuItem(text = { Text("Log out") }, onClick = { menu = false; onLogout() })
                         }
                     }
                 }
@@ -490,7 +619,10 @@ fun HomeScreen(
                         Text(hm(m.time), style = txt(13, FontWeight.Normal, Grey))
                     }
                 }
-                if (shown.isEmpty()) Text("No meetings found", style = txt(14, FontWeight.Normal, Grey), modifier = Modifier.padding(vertical = 16.dp))
+                if (shown.isEmpty()) Text(
+                    if (meetings.isEmpty()) "No meetings yet. Tap ⋮ to add your first one." else "No meetings found",
+                    style = txt(14, FontWeight.Normal, Grey), modifier = Modifier.padding(vertical = 16.dp),
+                )
             }
 
             // widget card
@@ -509,7 +641,7 @@ fun HomeScreen(
         }
     }
 
-    if (showNew) NewMeetingDialog({ showNew = false }) { onAddMeeting(it); showNew = false }
+    if (showNew) NewMeetingDialog(userName, { showNew = false }) { onAddMeeting(it); showNew = false }
     if (showMember) AddMemberDialog({ showMember = false }) { onAddMember(it); showMember = false }
     if (showJoin) JoinDialog { showJoin = false }
 }
@@ -520,12 +652,12 @@ fun WidgetPreview(m: Meeting?, modifier: Modifier = Modifier) {
         Image(painterResource(R.drawable.meeting_bg), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.45f to Color.Transparent, 1f to Color(0xE6000000))))
         Text(
-            m?.title ?: "Team Standup", style = txt(9, FontWeight.Normal, Ink), maxLines = 1,
+            m?.title ?: "No meetings", style = txt(9, FontWeight.Normal, Ink), maxLines = 1,
             modifier = Modifier.padding(10.dp).clip(RoundedCornerShape(12.dp)).background(Color.White.copy(.8f))
                 .padding(horizontal = 8.dp, vertical = 3.dp),
         )
         Column(Modifier.align(Alignment.BottomStart).padding(10.dp)) {
-            Text("${m?.let { hm(it.time) } ?: "09:30"} | ${m?.team ?: "Product Team"}", style = txt(8, FontWeight.Normal, Color.White.copy(.85f)), maxLines = 1)
+            Text("${m?.let { hm(it.time) } ?: "--:--"} | ${m?.team ?: "Add one"}", style = txt(8, FontWeight.Normal, Color.White.copy(.85f)), maxLines = 1)
             Text("Meeting", style = txt(20, FontWeight.SemiBold))
         }
         Box(
@@ -600,8 +732,11 @@ fun MeetingScreen(m: Meeting, onClose: () -> Unit) {
                     Box(Modifier.width(1.dp).height(34.dp).background(Color.White.copy(.5f)))
                     Spacer(Modifier.width(12.dp))
                     Column {
-                        Text("${m.team} ·", style = txt(11, FontWeight.Normal, Color.White.copy(.85f)))
-                        Text(m.kind, style = txt(11, FontWeight.Normal, Color.White.copy(.7f)))
+                        Text(
+                            if (m.kind.isNotBlank()) "${m.team} ·" else m.team,
+                            style = txt(11, FontWeight.Normal, Color.White.copy(.85f)),
+                        )
+                        if (m.kind.isNotBlank()) Text(m.kind, style = txt(11, FontWeight.Normal, Color.White.copy(.7f)))
                     }
                 }
                 Text("Meeting", style = txt(60, FontWeight.SemiBold))
@@ -662,10 +797,11 @@ fun MeetingScreen(m: Meeting, onClose: () -> Unit) {
 // ───────────────────────── Dialogs ─────────────────────────
 
 @Composable
-fun NewMeetingDialog(onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
+fun NewMeetingDialog(defaultHost: String, onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
     val ctx = LocalContext.current
     var title by remember { mutableStateOf("") }
-    var host by remember { mutableStateOf("Caleb May") }
+    var host by remember { mutableStateOf(defaultHost) }
+    var team by remember { mutableStateOf("") }
     var hour by remember { mutableIntStateOf(9) }
     var minute by remember { mutableIntStateOf(30) }
     var remind by remember { mutableIntStateOf(10) }
@@ -679,6 +815,7 @@ fun NewMeetingDialog(onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(title, { title = it }, label = { Text("Title") }, singleLine = true)
                 OutlinedTextField(host, { host = it }, label = { Text("Host") }, singleLine = true)
+                OutlinedTextField(team, { team = it }, label = { Text("Team (optional)") }, singleLine = true)
                 OutlinedTextField(
                     link, { link = it }, singleLine = true,
                     label = { Text("Meet / Teams / Zoom link (optional)") },
@@ -707,7 +844,7 @@ fun NewMeetingDialog(onDismiss: () -> Unit, onSave: (Meeting) -> Unit) {
                     }
                     onSave(
                         Meeting(
-                            (System.currentTimeMillis() % 1_000_000_000L).toInt(), title.trim(), "Product Team",
+                            (System.currentTimeMillis() % 1_000_000_000L).toInt(), title.trim(), team.trim().ifBlank { "Personal" },
                             host.ifBlank { "Me" }, cal.timeInMillis, remind, alarm, 1,
                             link = link.trim().let { if (it.isNotEmpty() && !it.startsWith("http", true)) "https://$it" else it },
                         )
