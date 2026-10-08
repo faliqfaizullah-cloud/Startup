@@ -13,11 +13,12 @@
         android:scaleType="centerCrop"
         android:src="@drawable/meeting_bg" />
 
-    <View
+    <ImageView
         android:layout_width="match_parent"
         android:layout_height="96dp"
         android:layout_gravity="bottom"
-        android:background="@drawable/widget_scrim" />
+        android:scaleType="fitXY"
+        android:src="@drawable/widget_scrim" />
 
     <TextView
         android:id="@+id/w_chip"
