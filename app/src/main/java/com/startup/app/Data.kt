@@ -63,12 +63,14 @@ object Store {
     private fun g(c: Context) = c.getSharedPreferences("startup", Context.MODE_PRIVATE)
 
     /** Meetings and members live in a separate store per logged-in account. */
-    private fun p(c: Context): SharedPreferences {
+    fun acctId(c: Context): String {
         val u = Accounts.current(c) ?: "none"
-        val id = MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
+        return MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
             .joinToString("") { "%02x".format(it) }.take(16)
-        return c.getSharedPreferences("startup_data_$id", Context.MODE_PRIVATE)
     }
+
+    private fun p(c: Context): SharedPreferences =
+        c.getSharedPreferences("startup_data_${acctId(c)}", Context.MODE_PRIVATE)
 
     fun meetings(c: Context): List<Meeting> {
         val raw = p(c).getString("meetings", null)

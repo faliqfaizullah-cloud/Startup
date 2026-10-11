@@ -63,6 +63,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -82,6 +84,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -213,10 +216,12 @@ sealed interface Screen {
     data object Register : Screen
     data object Home : Screen
     data class Meet(val id: Int) : Screen
+    data object Transcripts : Screen
+    data class TranscriptView(val id: Long) : Screen
 }
 
 @Composable
-fun StartupRoot(openId: Int?) {
+fun StartupRoot(openId: Int?, openTranscript: Long?) {
     val ctx = LocalContext.current
     var meetings by remember { mutableStateOf(Store.meetings(ctx)) }
     var members by remember { mutableStateOf(Store.members(ctx)) }
@@ -226,6 +231,7 @@ fun StartupRoot(openId: Int?) {
             when {
                 !Store.onboarded(ctx) -> Screen.Onboard
                 Accounts.current(ctx) == null -> Screen.Login
+                openTranscript != null -> Screen.TranscriptView(openTranscript)
                 openId != null -> Screen.Meet(openId)
                 else -> Screen.Home
             }
@@ -245,12 +251,20 @@ fun StartupRoot(openId: Int?) {
         StartupWidget.refreshAll(ctx)
     }
 
-    BackHandler(enabled = screen is Screen.Meet || screen is Screen.Register) {
-        screen = if (screen is Screen.Register) Screen.Login else Screen.Home
+    BackHandler(
+        enabled = screen is Screen.Meet || screen is Screen.Register ||
+            screen is Screen.Transcripts || screen is Screen.TranscriptView,
+    ) {
+        screen = when (screen) {
+            is Screen.Register -> Screen.Login
+            is Screen.TranscriptView -> Screen.Transcripts
+            else -> Screen.Home
+        }
     }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Ink)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
+            KeepAwakeWhileBusy()
             AnimatedContent(screen, transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(250)) }, label = "nav") { s ->
                 when (s) {
                     Screen.Onboard -> Onboarding(
@@ -279,6 +293,7 @@ fun StartupRoot(openId: Int?) {
                             loadAccount()
                             screen = Screen.Login
                         },
+                        onTranscripts = { screen = Screen.Transcripts },
                         onOpen = { screen = Screen.Meet(it) },
                         onAddMeeting = { m ->
                             Store.save(ctx, meetings + m)
@@ -289,6 +304,14 @@ fun StartupRoot(openId: Int?) {
                             members = members + n
                             Store.saveMembers(ctx, members)
                         },
+                    )
+                    Screen.Transcripts -> TranscriptsScreen(
+                        onBack = { screen = Screen.Home },
+                        onOpen = { screen = Screen.TranscriptView(it) },
+                    )
+                    is Screen.TranscriptView -> TranscriptDetail(
+                        id = s.id,
+                        onBack = { screen = Screen.Transcripts },
                     )
                     is Screen.Meet -> {
                         val m = meetings.firstOrNull { it.id == s.id } ?: meetings.firstOrNull()
@@ -449,6 +472,7 @@ fun HomeScreen(
     members: List<String>,
     userName: String,
     onLogout: () -> Unit,
+    onTranscripts: () -> Unit,
     onOpen: (Int) -> Unit,
     onAddMeeting: (Meeting) -> Unit,
     onAddMember: (String) -> Unit,
@@ -588,6 +612,7 @@ fun HomeScreen(
                             contentAlignment = Alignment.Center,
                         ) { Icon(Icons.Filled.MoreVert, null, tint = Ink, modifier = Modifier.size(18.dp)) }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Transcripts") }, onClick = { menu = false; onTranscripts() })
                             DropdownMenuItem(text = { Text("Join with code or link") }, onClick = { menu = false; showJoin = true })
                             DropdownMenuItem(text = { Text("New meeting") }, onClick = { menu = false; showNew = true })
                             DropdownMenuItem(text = { Text("Add widget to home screen") }, onClick = { menu = false; requestPin(ctx) })
@@ -623,6 +648,25 @@ fun HomeScreen(
                     if (meetings.isEmpty()) "No meetings yet. Tap ⋮ to add your first one." else "No meetings found",
                     style = txt(14, FontWeight.Normal, Grey), modifier = Modifier.padding(vertical = 16.dp),
                 )
+            }
+
+            // transcripts entry
+            Spacer(Modifier.height(16.dp))
+            val tJob by TJob.state.collectAsState()
+            val tCount = remember(tJob) { TStore.list(ctx).size }
+            Row(
+                Modifier.fillMaxWidth().glass().bounceClick { onTranscripts() }.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(52.dp).clip(CircleShape).background(Yellow), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Mic, null, tint = Ink)
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Transcripts", style = txt(17))
+                    Text(jobLine(tJob, tCount), style = txt(12, FontWeight.Normal, Color.White.copy(.75f)))
+                }
+                Icon(Icons.Filled.ChevronRight, null, tint = Color.White)
             }
 
             // widget card
