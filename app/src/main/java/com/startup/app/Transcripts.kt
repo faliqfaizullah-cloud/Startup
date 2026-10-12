@@ -208,6 +208,8 @@ object Models {
         Lang("fr", "French", "vosk-model-small-fr-0.22", 40),
         Lang("de", "German", "vosk-model-small-de-0.15", 44),
         Lang("ja", "Japanese", "vosk-model-small-ja-0.22", 47),
+        Lang("en-w", "English (Whisper)", "", 0, "whisper", "en"),
+        Lang("auto", "Auto-detect (Whisper)", "", 0, "whisper", ""),
         Lang("ms", "Malay", "", 0, "whisper", "ms"),
         Lang("id", "Indonesian", "", 0, "whisper", "id"),
         Lang("ta", "Tamil", "", 0, "whisper", "ta"),
@@ -703,7 +705,7 @@ class VoiceRecorder(private val ctx: Context) {
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             r.setAudioChannels(1)
             r.setAudioSamplingRate(16000)
-            r.setAudioEncodingBitRate(64_000)
+            r.setAudioEncodingBitRate(96_000)
             r.setOutputFile(f.absolutePath)
             r.prepare()
             r.start()

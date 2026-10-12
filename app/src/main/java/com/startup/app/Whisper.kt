@@ -32,9 +32,11 @@ import kotlin.math.sqrt
 // ───────────────────────── Offline Whisper (sherpa-onnx): Malay, Indonesian, Tamil ─────────────────────────
 
 object WhisperEngine {
-    private const val MAX_CHUNK = 28 * RATE     // Whisper reads at most 30 s at a time
-    private const val SEARCH = 6 * RATE         // look for a quiet spot in the last 6 s of a chunk
-    private const val WINDOW = RATE / 10        // 100 ms energy window
+    private const val FRAME = RATE / 10          // 100 ms analysis frame
+    private const val MIN_CHUNK = 5 * RATE       // don't cut on a pause before this
+    private const val HARD_CHUNK = 22 * RATE     // Whisper reads at most 30 s; cut by here at the quietest spot
+    private const val SEARCH = 6 * RATE
+    private const val PAUSE_FRAMES = 6           // 600 ms of quiet = end of a phrase
 
     fun transcribe(
         c: Context,
@@ -51,7 +53,7 @@ object WhisperEngine {
                 whisper = OfflineWhisperModelConfig(
                     encoder = File(dir, "${w.key}-encoder.int8.onnx").absolutePath,
                     decoder = File(dir, "${w.key}-decoder.int8.onnx").absolutePath,
-                    language = lang.tag,
+                    language = lang.tag,   // "" = Whisper detects the language itself
                     task = "transcribe",
                 ),
                 tokens = File(dir, "${w.key}-tokens.txt").absolutePath,
@@ -69,59 +71,116 @@ object WhisperEngine {
         try {
             val out = StringBuilder()
             var words = 0
+            var lastText = ""
+            var speech = 0.05f // running level of speech, to tell speech from background noise
 
-            fun decode(samples: FloatArray, startSample: Long) {
-                if (isQuiet(samples)) return
+            fun rms(a: FloatArray, from: Int, to: Int): Float {
+                var e = 0.0
+                for (k in from until to) e += a[k] * a[k]
+                return sqrt(e / (to - from).coerceAtLeast(1)).toFloat()
+            }
+
+            fun quietLevel() = maxOf(0.004f, speech * 0.12f)
+
+            fun decode(all: FloatArray, startSample: Long) {
+                val q = quietLevel()
+                // trim the leading silence so the time stamp points at the first spoken word
+                var first = 0
+                var voiced = 0
+                var frames = 0
+                var f = 0
+                while (f + FRAME <= all.size) {
+                    val v = rms(all, f, f + FRAME) >= q
+                    if (v) { if (voiced == 0) first = f; voiced++ }
+                    frames++
+                    f += FRAME
+                }
+                // too little speech: Whisper would invent words from the noise
+                if (voiced == 0 || voiced * 100 < frames * 12) return
+                val from = (first - 2 * FRAME).coerceAtLeast(0)
+                val samples = all.copyOfRange(from, all.size)
+
+                var peak = 0f
+                for (v in samples) if (abs(v) > peak) peak = abs(v)
+                if (peak < 0.01f) return
+                if (peak < 0.3f) {
+                    val g = minOf(8f, 0.5f / peak)
+                    for (i in samples.indices) samples[i] *= g
+                }
+
                 val st = rec.createStream()
                 try {
                     st.acceptWaveform(samples, RATE)
                     rec.decode(st)
                     val text = rec.getResult(st).text.trim()
                     if (text.isEmpty()) return
-                    words += text.split(Regex("\\s+")).count { it.isNotBlank() }
-                    out.append('[').append(mmss((startSample / RATE).toInt())).append("] ")
+                    val n = text.split(Regex("\\s+")).count { it.isNotBlank() }
+                    // the same short phrase twice in a row is almost always a made-up repeat
+                    if (n <= 5 && text.equals(lastText, ignoreCase = true)) return
+                    lastText = text
+                    words += n
+                    out.append('[').append(mmss(((startSample + from) / RATE).toInt())).append("] ")
                         .append(text.replaceFirstChar { it.uppercase() }).append('\n')
                 } finally {
                     st.release()
                 }
             }
 
-            val buf = FloatArray(MAX_CHUNK + RATE)
+            val buf = FloatArray(HARD_CHUNK + 2 * RATE)
             var len = 0
             var base = 0L // samples already handed to the recognizer
 
-            fun cut() {
-                var at = len
-                if (len >= MAX_CHUNK) {
-                    // cut at the quietest 100 ms near the end so words aren't split
-                    var best = Double.MAX_VALUE
-                    var i = len - SEARCH
-                    while (i + WINDOW <= len) {
-                        var e = 0.0
-                        for (k in i until i + WINDOW) e += buf[k] * buf[k]
-                        if (e < best) {
-                            best = e
-                            at = i + WINDOW / 2
-                        }
-                        i += WINDOW / 2
-                    }
-                }
+            fun emit(at: Int) {
                 decode(buf.copyOf(at), base)
                 System.arraycopy(buf, at, buf, 0, len - at)
                 len -= at
                 base += at
             }
 
+            fun maybeCut(newFrom: Int) {
+                // update the speech level from the newest audio
+                var f = newFrom
+                while (f + FRAME <= len) {
+                    val r = rms(buf, f, f + FRAME)
+                    if (r > 0.01f) speech = speech * 0.95f + r * 0.05f
+                    f += FRAME
+                }
+                if (len >= HARD_CHUNK) {
+                    // no pause found: cut at the quietest 100 ms near the end so words aren't split
+                    var best = Float.MAX_VALUE
+                    var at = len
+                    var i = len - SEARCH
+                    while (i + FRAME <= len) {
+                        val r = rms(buf, i, i + FRAME)
+                        if (r < best) { best = r; at = i + FRAME / 2 }
+                        i += FRAME / 2
+                    }
+                    emit(at)
+                    return
+                }
+                if (len >= MIN_CHUNK) {
+                    val q = quietLevel()
+                    var run = 0
+                    var e = len
+                    while (run < PAUSE_FRAMES && e - FRAME >= 0 && rms(buf, e - FRAME, e) < q) {
+                        run++
+                        e -= FRAME
+                    }
+                    if (run >= PAUSE_FRAMES) emit(len)
+                }
+            }
+
             val dur = Decoder.decode(
                 c, uri,
                 { bytes, n ->
+                    val from = len
                     var i = 0
                     while (i + 1 < n) {
                         val v = (bytes[i].toInt() and 0xFF) or (bytes[i + 1].toInt() shl 8)
                         buf[len++] = v.toShort() / 32768f
                         i += 2
                     }
-                    if (len >= MAX_CHUNK) cut()
+                    maybeCut(from)
                 },
                 onProgress, cancelled,
             )
@@ -130,18 +189,6 @@ object WhisperEngine {
         } finally {
             rec.release()
         }
-    }
-
-    /** Whisper invents words from silence, so near-silent chunks are skipped. */
-    private fun isQuiet(s: FloatArray): Boolean {
-        var sum = 0.0
-        var peak = 0f
-        for (v in s) {
-            sum += v * v
-            if (abs(v) > peak) peak = abs(v)
-        }
-        val rms = sqrt(sum / s.size.coerceAtLeast(1))
-        return rms < 0.003 || peak < 0.02f
     }
 }
 

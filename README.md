@@ -27,6 +27,9 @@ Meeting + task reminder app. Kotlin, Jetpack Compose, min SDK 26.
     permission; audio may be processed by Google. Experimental, depends on the phone; it only appears when available.
 
 ## Notes on Transcripts
+- 1.4.1: Whisper now splits speech at natural pauses (not fixed 28 s blocks), so each line's time stamp points at the first spoken word; trims silence, boosts quiet audio and drops invented text on noise.
+- New languages: English (Whisper) and Auto-detect (Whisper). Whisper is much more accurate than the small offline packs and adds punctuation. Use Small for best results.
+- Recordings made in the app can be played back inside the transcript; tap any line to jump to that moment and check it against the sound.
 - Whisper cuts audio into ~28 s pieces at quiet moments and skips near-silent pieces; it is slower than the other languages and adds punctuation.
 - The APK is larger (~60 MB) because the Whisper engine's native libraries (arm64 + armv7) are included.
 - Output has no punctuation and accuracy depends on audio quality; the small models trade accuracy for speed and size.

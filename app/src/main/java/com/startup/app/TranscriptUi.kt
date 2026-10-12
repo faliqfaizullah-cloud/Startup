@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -64,6 +65,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -242,7 +244,7 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
                         "Whisper ${Models.wsize(ctx).label} is on your phone. Works offline, and is slower than other languages."
                     lang.engine == "whisper" ->
                         "${lang.label} uses Whisper: a one-time ${Models.wsize(ctx).mb} MB download, then works offline. " +
-                            "Small is the most accurate for Malay."
+                            "Small is the most accurate."
                     Models.installed(ctx, lang) -> "${lang.label} pack is on your phone. Works offline."
                     else -> "${lang.label} needs a one-time ${lang.mb} MB download, then works offline."
                 },
@@ -416,6 +418,51 @@ fun TranscriptDetail(id: Long, onBack: () -> Unit) {
     var stamps by remember { mutableStateOf(true) }
     var confirmDelete by remember { mutableStateOf(false) }
 
+    // playback of the in-app recording, so every line can be checked against the sound
+    val audioFile = remember(id) { t?.audio?.takeIf { it.isNotBlank() }?.let { File(it) }?.takeIf { it.exists() } }
+    var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var playing by remember { mutableStateOf(false) }
+    var posSec by remember { mutableIntStateOf(0) }
+    DisposableEffect(id) { onDispose { try { player?.release() } catch (_: Exception) {} } }
+    LaunchedEffect(playing) {
+        while (playing) {
+            posSec = (player?.currentPosition ?: 0) / 1000
+            delay(250)
+        }
+    }
+    fun ensurePlayer(): MediaPlayer? {
+        player?.let { return it }
+        val f = audioFile ?: return null
+        return try {
+            MediaPlayer().apply {
+                setDataSource(f.absolutePath)
+                prepare()
+                setOnCompletionListener { playing = false; posSec = 0 }
+            }.also { player = it }
+        } catch (_: Exception) {
+            Toast.makeText(ctx, "Couldn't play the recording", Toast.LENGTH_SHORT).show()
+            null
+        }
+    }
+    fun playFrom(sec: Int?) {
+        val p = ensurePlayer() ?: return
+        if (sec != null) { p.seekTo(sec * 1000); posSec = sec }
+        p.start()
+        playing = true
+    }
+    fun pause() {
+        try { player?.pause() } catch (_: Exception) {}
+        playing = false
+    }
+    fun toSec(stamp: String): Int = stamp.split(":").fold(0) { a, p -> a * 60 + (p.toIntOrNull() ?: 0) }
+    val lines = remember(raw) {
+        raw.lines().filter { it.isNotBlank() }.map { l ->
+            val (st, tx) = TStore.parse(l)
+            Triple(st?.let { toSec(it) }, st, tx)
+        }
+    }
+    val activeIdx = lines.indexOfLast { (sec, _, _) -> sec != null && sec <= posSec }
+
     val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri: Uri? ->
         if (uri != null && t != null) {
             try {
@@ -499,16 +546,46 @@ fun TranscriptDetail(id: Long, onBack: () -> Unit) {
                     .padding(horizontal = 14.dp, vertical = 8.dp),
             ) { Text("Timestamps", style = txt(13, FontWeight.Medium, if (stamps) Ink else Color.White)) }
 
+            if (audioFile != null) {
+                Spacer(Modifier.height(14.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    PillButton(if (playing) "Pause" else "Play recording", true, Modifier.height(46.dp)) {
+                        if (playing) pause() else playFrom(null)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text("${mmss(posSec)} / ${mmss(t.durationSec)}", style = txt(13, FontWeight.Medium, Color.White.copy(.85f)))
+                }
+            }
+
             Spacer(Modifier.height(14.dp))
             Column(Modifier.fillMaxWidth().clip(R28).background(Color.White).padding(20.dp)) {
-                SelectionContainer {
-                    Text(body, style = txt(16, FontWeight.Normal, Ink).copy(lineHeight = 24.sp))
+                if (audioFile != null) {
+                    Text("Tap a line to hear it.", style = txt(12, FontWeight.Normal, Grey))
+                    Spacer(Modifier.height(8.dp))
+                    lines.forEachIndexed { i, (sec, st, tx) ->
+                        val on = playing && i == activeIdx
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                .background(if (on) Yellow.copy(alpha = .45f) else Color.Transparent)
+                                .clickable(enabled = sec != null) { playFrom(sec) }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                        ) {
+                            if (st != null && stamps) {
+                                Text("[$st]", style = txt(12, FontWeight.Medium, Grey), modifier = Modifier.padding(top = 3.dp, end = 8.dp))
+                            }
+                            Text(tx, style = txt(16, FontWeight.Normal, Ink).copy(lineHeight = 24.sp), modifier = Modifier.weight(1f))
+                        }
+                    }
+                } else {
+                    SelectionContainer {
+                        Text(body, style = txt(16, FontWeight.Normal, Ink).copy(lineHeight = 24.sp))
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "Tip: touch and hold the text to select part of it. " +
-                    "Speech recognition can miss words, so check anything important.",
+                "Speech recognition can miss words, so check anything important. " +
+                    "Tip: for the best accuracy choose Whisper (Small), even for English.",
                 style = txt(12, FontWeight.Normal, Color.White.copy(.65f)),
             )
             Spacer(Modifier.height(24.dp))
