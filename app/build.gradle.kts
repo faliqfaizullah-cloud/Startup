@@ -12,8 +12,8 @@ android {
         applicationId = "com.startup.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.3.0"
+        versionCode = 6
+        versionName = "1.4.0"
 
         // Keeps the APK smaller: the speech engine ships native libraries per CPU type.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
@@ -32,6 +32,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 dependencies {

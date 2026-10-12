@@ -141,6 +141,10 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
             TJob.start(ctx, uri, displayName(ctx, uri), "Imported", langCode)
         }
     }
+    val micForGoogle = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) picker.launch(arrayOf("audio/*", "video/*"))
+        else Toast.makeText(ctx, "The Google recognizer needs the microphone permission", Toast.LENGTH_LONG).show()
+    }
 
     fun beginRecording() {
         if (recorder.start()) {
@@ -167,6 +171,8 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
     }
 
     val lang = Models.lang(langCode)
+    var wsize by remember { mutableStateOf(Models.wsize(ctx).key) }
+    val shown = remember { Models.langs.filter { Models.usable(ctx, it) } }
 
     Box(Modifier.fillMaxSize().background(BgBrush)) {
         Column(
@@ -183,7 +189,7 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
             Spacer(Modifier.height(10.dp))
             Text(
                 "Import a voice or video recording, or record now, and get every word as text. " +
-                    "It runs on your phone, so your audio never leaves it.",
+                    "Most languages run fully on your phone, so your audio never leaves it.",
                 style = txt(14, FontWeight.Normal, Color.White.copy(.8f)),
             )
 
@@ -191,7 +197,7 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
             Text("Language of the speech", style = txt(13, FontWeight.Medium, Color.White.copy(.8f)))
             Spacer(Modifier.height(8.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(Models.langs) { l ->
+                items(shown) { l ->
                     val sel = l.code == langCode
                     Box(
                         Modifier.clip(RoundedCornerShape(50))
@@ -205,9 +211,41 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
                 }
             }
             Spacer(Modifier.height(6.dp))
+            if (lang.engine == "whisper") {
+                Spacer(Modifier.height(10.dp))
+                Text("Model size (bigger is more accurate but slower)", style = txt(12, FontWeight.Medium, Color.White.copy(.8f)))
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Models.wsizes.forEach { w ->
+                        val sel = w.key == wsize
+                        Box(
+                            Modifier.clip(RoundedCornerShape(50))
+                                .background(if (sel) Color.White else Color.White.copy(.16f))
+                                .bounceClick {
+                                    if (!busy) {
+                                        wsize = w.key
+                                        Models.setWsize(ctx, w.key)
+                                    }
+                                }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                        ) { Text("${w.label} · ${w.mb} MB", style = txt(12, FontWeight.Medium, if (sel) Ink else Color.White)) }
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
             Text(
-                if (Models.installed(ctx, lang)) "${lang.label} pack is on your phone. Works offline."
-                else "${lang.label} needs a one-time ${lang.mb} MB download, then works offline.",
+                when {
+                    lang.engine == "google" ->
+                        "Uses the Google speech recognizer built into your phone (Android 13+). Needs internet, " +
+                            "so the audio may be processed by Google. Experimental: it depends on your phone."
+                    lang.engine == "whisper" && Models.installed(ctx, lang) ->
+                        "Whisper ${Models.wsize(ctx).label} is on your phone. Works offline, and is slower than other languages."
+                    lang.engine == "whisper" ->
+                        "${lang.label} uses Whisper: a one-time ${Models.wsize(ctx).mb} MB download, then works offline. " +
+                            "Small is the most accurate for Malay."
+                    Models.installed(ctx, lang) -> "${lang.label} pack is on your phone. Works offline."
+                    else -> "${lang.label} needs a one-time ${lang.mb} MB download, then works offline."
+                },
                 style = txt(12, FontWeight.Normal, Color.White.copy(.65f)),
             )
 
@@ -216,6 +254,10 @@ fun TranscriptsScreen(onBack: () -> Unit, onOpen: (Long) -> Unit) {
                 PillButton("Import file", true, Modifier.weight(1f)) {
                     if (busy || recording) {
                         Toast.makeText(ctx, "Finish the current task first", Toast.LENGTH_SHORT).show()
+                    } else if (lang.engine == "google" &&
+                        ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        micForGoogle.launch(Manifest.permission.RECORD_AUDIO)
                     } else {
                         picker.launch(arrayOf("audio/*", "video/*"))
                     }

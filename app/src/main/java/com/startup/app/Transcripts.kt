@@ -151,12 +151,53 @@ fun displayName(c: Context, uri: Uri): String {
 
 // ───────────────────────── Language packs (downloaded once, then offline) ─────────────────────────
 
-data class Lang(val code: String, val label: String, val dir: String, val mb: Int) {
+/** engine: "vosk" (small offline pack), "whisper" (offline, multilingual) or "google" (phone's own recognizer). */
+data class Lang(
+    val code: String,
+    val label: String,
+    val dir: String,
+    val mb: Int,
+    val engine: String = "vosk",
+    val tag: String = "",   // language tag for Whisper ("ms") or Google ("ms-MY")
+) {
     val url: String get() = "https://alphacephei.com/vosk/models/$dir.zip"
 }
 
+data class WFile(val name: String, val size: Long)
+
+/** Whisper model sizes (int8). Files are fetched from the sherpa-onnx model repos on Hugging Face. */
+data class WSize(val key: String, val label: String, val repo: String, val files: List<WFile>) {
+    val total: Long get() = files.sumOf { it.size }
+    val mb: Int get() = (total / 1_000_000L).toInt()
+}
+
 object Models {
-    /** Malay, Indonesian and Tamil have no offline model in Vosk. */
+    val wsizes = listOf(
+        WSize("tiny", "Tiny", "sherpa-onnx-whisper-tiny", listOf(
+            WFile("tiny-encoder.int8.onnx", 12_937_772), WFile("tiny-decoder.int8.onnx", 89_855_401), WFile("tiny-tokens.txt", 816_730))),
+        WSize("base", "Base", "sherpa-onnx-whisper-base", listOf(
+            WFile("base-encoder.int8.onnx", 29_120_534), WFile("base-decoder.int8.onnx", 130_672_026), WFile("base-tokens.txt", 816_730))),
+        WSize("small", "Small", "sherpa-onnx-whisper-small", listOf(
+            WFile("small-encoder.int8.onnx", 112_442_483), WFile("small-decoder.int8.onnx", 262_226_114), WFile("small-tokens.txt", 816_730))),
+    )
+
+    fun wsize(c: Context): WSize {
+        val k = c.getSharedPreferences("startup", Context.MODE_PRIVATE).getString("t_wsize", "base")
+        return wsizes.firstOrNull { it.key == k } ?: wsizes[1]
+    }
+
+    fun setWsize(c: Context, key: String) {
+        c.getSharedPreferences("startup", Context.MODE_PRIVATE).edit().putString("t_wsize", key).apply()
+    }
+
+    fun wdir(c: Context, w: WSize) = File(root(c), "whisper-${w.key}")
+
+    /** The phone's own recognizer can read an audio file only on Android 13+. */
+    fun googleOk(c: Context): Boolean =
+        Build.VERSION.SDK_INT >= 33 && android.speech.SpeechRecognizer.isRecognitionAvailable(c)
+
+    fun usable(c: Context, l: Lang): Boolean = l.engine != "google" || googleOk(c)
+
     val langs = listOf(
         Lang("en-us", "English (US)", "vosk-model-small-en-us-0.15", 39),
         Lang("en-gb", "English (UK)", "vosk-model-small-en-gb-0.15", 41),
@@ -167,15 +208,76 @@ object Models {
         Lang("fr", "French", "vosk-model-small-fr-0.22", 40),
         Lang("de", "German", "vosk-model-small-de-0.15", 44),
         Lang("ja", "Japanese", "vosk-model-small-ja-0.22", 47),
+        Lang("ms", "Malay", "", 0, "whisper", "ms"),
+        Lang("id", "Indonesian", "", 0, "whisper", "id"),
+        Lang("ta", "Tamil", "", 0, "whisper", "ta"),
+        Lang("ms-g", "Malay (Google)", "", 0, "google", "ms-MY"),
     )
 
     fun lang(code: String): Lang = langs.firstOrNull { it.code == code } ?: langs[0]
 
     private fun root(c: Context) = File(c.filesDir, "models").apply { mkdirs() }
     fun path(c: Context, l: Lang) = File(root(c), l.dir)
-    fun installed(c: Context, l: Lang) = File(path(c, l), ".ok").exists()
+    fun installed(c: Context, l: Lang): Boolean = when (l.engine) {
+        "google" -> true
+        "whisper" -> wsize(c).let { w -> w.files.all { File(wdir(c, w), it.name).let { f -> f.exists() && f.length() == it.size } } }
+        else -> File(path(c, l), ".ok").exists()
+    }
 
     fun download(c: Context, l: Lang, onProgress: (Int) -> Unit, cancelled: () -> Boolean) {
+        if (l.engine == "whisper") downloadWhisper(c, wsize(c), onProgress, cancelled) else downloadVosk(c, l, onProgress, cancelled)
+    }
+
+    /** Downloads each missing file to .part and renames it when the size matches; finished files are kept if cancelled. */
+    private fun downloadWhisper(c: Context, w: WSize, onProgress: (Int) -> Unit, cancelled: () -> Boolean) {
+        val dir = wdir(c, w).apply { mkdirs() }
+        var done = w.files.sumOf { f -> File(dir, f.name).let { if (it.exists() && it.length() == f.size) f.size else 0L } }
+        var lastPct = -1
+        for (f in w.files) {
+            val target = File(dir, f.name)
+            if (target.exists() && target.length() == f.size) continue
+            val part = File(dir, f.name + ".part")
+            val conn = URL("https://huggingface.co/csukuangfj/${w.repo}/resolve/main/${f.name}").openConnection() as HttpURLConnection
+            conn.connectTimeout = 20_000
+            conn.readTimeout = 30_000
+            try {
+                if (conn.responseCode !in 200..299) {
+                    throw UserError("Couldn't download the Whisper model (server error ${conn.responseCode}).")
+                }
+                conn.inputStream.use { input ->
+                    FileOutputStream(part).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            if (cancelled()) throw CancellationException("Cancelled")
+                            out.write(buf, 0, n)
+                            done += n
+                            val pct = (done * 100 / w.total).toInt().coerceIn(0, 99)
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                onProgress(pct)
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                part.delete()
+                throw t
+            } finally {
+                conn.disconnect()
+            }
+            if (part.length() != f.size) {
+                part.delete()
+                throw UserError("The model download was incomplete. Try again.")
+            }
+            target.delete()
+            if (!part.renameTo(target)) throw UserError("Couldn't save the model on this phone.")
+        }
+        onProgress(100)
+    }
+
+    private fun downloadVosk(c: Context, l: Lang, onProgress: (Int) -> Unit, cancelled: () -> Boolean) {
         val zip = File(c.cacheDir, "${l.dir}.zip")
         try {
             val conn = URL(l.url).openConnection() as HttpURLConnection
@@ -251,7 +353,7 @@ class UserError(message: String) : Exception(message)
 
 // ───────────────────────── Decoder: any audio/video file -> 16 kHz mono PCM ─────────────────────────
 
-private const val RATE = 16000
+internal const val RATE = 16000
 
 /** Collects 16-bit little-endian samples and hands them over in half-second chunks. */
 private class PcmPacker(private val sink: (ByteArray, Int) -> Unit) {
@@ -517,11 +619,17 @@ object TJob {
                 val res = withContext(Dispatchers.IO) {
                     val cancelled = { !isActive }
                     if (!Models.installed(app, lang)) {
-                        _state.value = JobState.Downloading(0, lang.label)
-                        Models.download(app, lang, { p -> _state.value = JobState.Downloading(p, lang.label) }, cancelled)
+                        val what = if (lang.engine == "whisper") "${lang.label} (Whisper ${Models.wsize(app).label})" else lang.label
+                        _state.value = JobState.Downloading(0, what)
+                        Models.download(app, lang, { p -> _state.value = JobState.Downloading(p, what) }, cancelled)
                     }
                     _state.value = JobState.Working(-1, title)
-                    Engine.transcribe(app, uri, lang, { p -> _state.value = JobState.Working(p, title) }, cancelled)
+                    val progress = { p: Int -> _state.value = JobState.Working(p, title) }
+                    when (lang.engine) {
+                        "whisper" -> WhisperEngine.transcribe(app, uri, lang, progress, cancelled)
+                        "google" -> GoogleEngine.transcribe(app, uri, lang, progress, cancelled)
+                        else -> Engine.transcribe(app, uri, lang, progress, cancelled)
+                    }
                 }
                 if (res.words == 0) {
                     if (audioPath.isNotBlank()) File(audioPath).delete()
